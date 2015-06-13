@@ -15,6 +15,8 @@ object Replicator {
   
   case class TimeOut(seq: Long)
 
+  case object ProcessSnapshot
+  
   def props(replica: ActorRef): Props = Props(new Replicator(replica))
 }
 
@@ -31,6 +33,7 @@ class Replicator(val replica: ActorRef) extends Actor {
   var acks = Map.empty[Long, (ActorRef, Replicate, Cancellable)]
   // a sequence of not-yet-sent snapshots (you can disregard this if not implementing batching)
   var pending = Vector.empty[Snapshot]
+  var senderMap = Map.empty[Long, ActorRef]
   
   var _seqCounter = 0L
   def nextSeq = {
@@ -39,13 +42,26 @@ class Replicator(val replica: ActorRef) extends Actor {
     ret
   }
 
+  val cancellable = context.system.scheduler.schedule(100.milliseconds, 100.milliseconds, self, ProcessSnapshot)
   
   /* TODO Behavior for the Replicator. */
   def receive: Receive = {
-    case Replicate(key, valueOption, id) => val seq = nextSeq
-                                            val cancellable = context.system.scheduler.schedule(0.milliseconds, 100.milliseconds, replica, Snapshot(key, valueOption, seq))
-                                            acks += seq -> (sender, Replicate(key, valueOption, id), cancellable)
-                                            context.system.scheduler.scheduleOnce(1.second, self, TimeOut(seq))
+    case Replicate(key, valueOption, id) => pending find {_.key.equals(key)} match {
+                                              case Some(Snapshot(_, _, prevId)) => senderMap -= prevId
+                                              case None =>
+                                            }
+                                            senderMap += id -> sender
+
+                                            pending = (pending filter {!_.key.equals(key)}) :+ Snapshot(key, valueOption, id)
+    case ProcessSnapshot => pending foreach { snapshot =>
+                              val seq = nextSeq
+                              val cancellable = context.system.scheduler.schedule(0.milliseconds, 100.milliseconds, replica, Snapshot(snapshot.key, snapshot.valueOption, seq))
+                              acks += seq -> (senderMap.getOrElse(snapshot.seq, self), Replicate(snapshot.key, snapshot.valueOption, snapshot.seq), cancellable)
+                              senderMap -= snapshot.seq
+                              context.system.scheduler.scheduleOnce(1.second, self, TimeOut(seq))
+                            }
+    
+                            pending = Vector.empty[Snapshot]
                                             
     case SnapshotAck(key, seq) if (acks contains seq) => val (primary, replicate, cancellable) = acks apply seq
                                                          cancellable.cancel()
@@ -56,5 +72,7 @@ class Replicator(val replica: ActorRef) extends Actor {
                                                 cancellable.cancel()
                                                 acks -= seq
   }
+  
+  override def postStop() = if (!cancellable.isCancelled) cancellable.cancel
 
 }
