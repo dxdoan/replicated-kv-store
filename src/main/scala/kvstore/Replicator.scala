@@ -46,8 +46,12 @@ class Replicator(val replica: ActorRef) extends Actor {
   
   /* TODO Behavior for the Replicator. */
   def receive: Receive = {
-    case Replicate(key, valueOption, id) => pending = (pending filter {!_.key.equals(key)}) :+ Snapshot(key, valueOption, id)
-                                            primary = sender
+    case Replicate(key, valueOption, id) => pending find (_.key equals key) match {
+                                              case Some(Snapshot(_, prevValueOption, _)) if (prevValueOption != None && valueOption == None) => pending = pending filter (!_.key.equals(key))
+                                              case _ => pending = (pending filter (!_.key.equals(key))) :+ Snapshot(key, valueOption, id)
+                                                        primary = sender
+                                            }
+      
     case ProcessSnapshot => pending foreach { snapshot =>
                               val seq = nextSeq
                               val cancellable = context.system.scheduler.schedule(0.milliseconds, 100.milliseconds, replica, Snapshot(snapshot.key, snapshot.valueOption, seq))
